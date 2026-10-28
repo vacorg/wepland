@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="tr"><head><meta charset="utf-8"><title>Kamera</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body{margin:0;background:#000;color:#eee;font:18px -apple-system,system-ui;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;text-align:center}
+  button{font-size:22px;padding:16px 36px;border:0;border-radius:12px;background:#2a7;color:#fff}
+  video{width:100%;max-height:50vh;margin-top:16px}
+</style></head><body>
+<button id="go">Başlat</button>
+<p id="st">Bu sayfayı açık bırak, ekranı kilitleme.</p>
+<video id="v" autoplay playsinline muted></video>
+<script>
+const $ = id => document.getElementById(id);
+let ws, pc, stream;
+const setStatus = t => $('st').textContent = t;
+
+function connect() {
+  ws = new WebSocket('wss://' + location.host + '/?role=phone');
+  ws.onopen = async () => {
+    setStatus('Bilgisayardan kamera seçmesi bekleniyor…');
+    try {
+      const list = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput')
+        .map(d => ({ id: d.deviceId, label: d.label }));
+      ws.send(JSON.stringify({ type: 'devices', list }));
+    } catch (e) {}
+  };
+  ws.onclose = () => { setStatus('bağlantı koptu, yeniden deniyor…'); setTimeout(connect, 1500); };
+  ws.onmessage = async e => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'start') start(m.facing, m.deviceId);
+    else if (m.type === 'torch') torch(m.on);
+    else if (m.type === 'answer' && pc) pc.setRemoteDescription(m.sdp);
+    else if (m.type === 'ice' && pc) pc.addIceCandidate(m.candidate).catch(() => {});
+  };
+}
+
+async function torch(on) {
+  const track = stream && stream.getVideoTracks()[0];
+  try {
+    if (!track) throw new Error('önce kamera açılmalı');
+    await track.applyConstraints({ advanced: [{ torch: on }] });
+  } catch (err) {
+    ws.send(JSON.stringify({ type: 'error', message: 'Flaş açılamadı: ' + err.message }));
+    ws.send(JSON.stringify({ type: 'torch-state', on: false }));
+  }
+}
+
+async function start(facing, deviceId) {
+  try {
+    if (pc) pc.close();
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: facing } }),
+        width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+    $('v').srcObject = stream;
+    pc = new RTCPeerConnection();
+    stream.getTracks().forEach(t => pc.addTrack(t, stream));
+    pc.onicecandidate = ev => ev.candidate && ws.send(JSON.stringify({ type: 'ice', candidate: ev.candidate }));
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    ws.send(JSON.stringify({ type: 'offer', sdp: pc.localDescription }));
+    setStatus(deviceId ? 'Kamera yayında' : facing === 'user' ? 'Ön kamera yayında' : 'Arka kamera yayında');
+  } catch (err) {
+    setStatus('Kamera hatası: ' + err.message);
+    ws.send(JSON.stringify({ type: 'error', message: err.message }));
+  }
+}
+
+$('go').onclick = async () => {
+  $('go').style.display = 'none';
+  try { (await navigator.mediaDevices.getUserMedia({ video: true })).getTracks().forEach(t => t.stop()); } catch (e) { setStatus('İzin verilmedi: ' + e.message); }
+  try { await navigator.wakeLock?.request('screen'); } catch (e) {}
+  connect();
+};
+</script></body></html>

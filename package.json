@@ -1,0 +1,1 @@
+{ "name": "wepland", "version": "1.0.0", "private": true, "main": "server.js", "dependencies": { "ws": "^8.18.0" } }

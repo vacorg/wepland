@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="tr"><head><meta charset="utf-8"><title>wepland</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body{margin:0;background:#111;color:#eee;font:16px system-ui;display:flex;flex-direction:column;height:100vh}
+  #bar{display:flex;gap:10px;padding:10px 12px;align-items:center;position:relative}
+  button,select{font:inherit;padding:10px 18px;border:0;border-radius:8px;background:#2f3136;color:#fff;cursor:pointer}
+  button:hover:not(:disabled){background:#3b3e45}
+  button:disabled{opacity:.4;cursor:default}
+  #flash.on,.chip.on{background:#f5c518;color:#000}
+  .pop{display:none;position:absolute;top:52px;background:#2f3136;border-radius:8px;z-index:5;box-shadow:0 4px 16px #000a}
+  #menu{left:12px;overflow:hidden}
+  #menu button{display:block;width:100%;text-align:left;border-radius:0;background:none;padding:12px 22px;white-space:nowrap}
+  #menu button:hover{background:#3b3e45}
+  #menu hr{border:0;border-top:1px solid #444;margin:0}
+  #menu small{display:block;padding:8px 22px 2px;opacity:.6}
+  #set{left:190px;padding:14px;width:300px}
+  #set label{display:block;margin:10px 0 4px;font-size:14px;opacity:.8}
+  #set .row{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{padding:7px 12px;background:#3b3e45}
+  #set input[type=range]{width:100%}
+  #st{margin-left:auto;opacity:.7;font-size:14px}
+  #wrap{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;background:#000}
+  #out{max-width:100%;max-height:100%;cursor:grab;touch-action:none}
+  #vid{position:absolute;width:2px;height:2px;opacity:0;pointer-events:none}
+  #foot{padding:10px 14px;font-size:14px;opacity:.85;text-align:center}
+  #foot b{user-select:all}
+</style></head><body>
+<div id="bar">
+  <button id="pick" disabled>Kamera seçimi ▾</button>
+  <button id="flash" disabled title="Telefon flaşı">🔦</button>
+  <button id="gear" title="Görüntü ayarları">⚙ Ayarlar</button>
+  <span id="st">telefon bekleniyor…</span>
+  <div id="menu" class="pop"></div>
+  <div id="set" class="pop">
+    <label>Çıkış boyutu (Discord'da görünen)</label>
+    <div class="row" id="sizes"></div>
+    <label>Döndür</label>
+    <div class="row"><button class="chip" id="rot">⟳ 90° çevir</button><button class="chip" id="reset">Sıfırla</button></div>
+    <label>Yakınlaştır: <span id="zv">1.0×</span></label>
+    <input type="range" id="zoom" min="1" max="4" step="0.05" value="1">
+    <label style="opacity:.6">İstediğin alanı seçmek için yakınlaştırıp önizlemeyi sürükle.</label>
+  </div>
+</div>
+<video id="vid" autoplay playsinline muted></video>
+<div id="wrap"><canvas id="out"></canvas></div>
+<div id="foot">Telefondan Safari'de aç: <b id="addr">…</b></div>
+<script>
+const $ = id => document.getElementById(id);
+const SIZES = [['Yatay 1280×720', 1280, 720], ['Yatay Full HD', 1920, 1080], ['Dikey 720×1280', 720, 1280], ['Kare 720×720', 720, 720]];
+let ws, pc, torchOn = false, devices = [];
+let cfg = { w: 1280, h: 720, rot: 0, zoom: 1, px: 0, py: 0 };
+try { Object.assign(cfg, JSON.parse(localStorage.getItem('wepland') || '{}')); } catch (e) {}
+const save = () => { try { localStorage.setItem('wepland', JSON.stringify(cfg)); } catch (e) {} };
+const setStatus = t => $('st').textContent = t;
+const out = $('out'), vid = $('vid'), ctx = out.getContext('2d');
+
+fetch('/info').then(r => r.json()).then(i => $('addr').textContent = i.urls.join('   |   ') || 'ağ bulunamadı');
+
+function connect() {
+  ws = new WebSocket('wss://' + location.host + '/?role=viewer');
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'size', w: cfg.w, h: cfg.h }));
+  ws.onclose = () => { setStatus('sunucu bağlantısı koptu, yeniden deniyor…'); setTimeout(connect, 1500); };
+  ws.onmessage = async e => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'peer') {
+      $('pick').disabled = $('flash').disabled = !m.online;
+      setStatus(m.online ? 'telefon hazır' : 'telefon bekleniyor…');
+      if (!m.online) { vid.srcObject = null; setTorch(false); }
+    } else if (m.type === 'devices') {
+      devices = m.list; buildMenu();
+    } else if (m.type === 'offer') {
+      if (pc) pc.close();
+      pc = new RTCPeerConnection();
+      pc.ontrack = ev => { vid.srcObject = ev.streams[0]; setStatus('görüntü geliyor'); };
+      pc.onicecandidate = ev => ev.candidate && ws.send(JSON.stringify({ type: 'ice', candidate: ev.candidate }));
+      await pc.setRemoteDescription(m.sdp);
+      const ans = await pc.createAnswer();
+      await pc.setLocalDescription(ans);
+      ws.send(JSON.stringify({ type: 'answer', sdp: pc.localDescription }));
+    } else if (m.type === 'ice' && pc) {
+      pc.addIceCandidate(m.candidate).catch(() => {});
+    } else if (m.type === 'error') {
+      setStatus(m.message);
+    } else if (m.type === 'torch-state') {
+      setTorch(m.on);
+    }
+  };
+}
+const setTorch = on => { torchOn = on; $('flash').classList.toggle('on', on); };
+const startCam = opts => { setTorch(false); setStatus('kamera açılıyor…'); ws.send(JSON.stringify({ type: 'start', ...opts })); };
+
+function buildMenu() {
+  const m = $('menu'); m.innerHTML = '';
+  const add = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.onclick = fn; m.appendChild(b); };
+  add('Ön kamera', () => startCam({ facing: 'user' }));
+  add('Arka kamera', () => startCam({ facing: 'environment' }));
+  if (devices.length > 1) {
+    m.appendChild(document.createElement('hr'));
+    const t = document.createElement('small'); t.textContent = 'Lensler (geniş açı vb.)'; m.appendChild(t);
+    devices.forEach(d => add(d.label || 'Kamera', () => startCam({ deviceId: d.id })));
+  }
+}
+buildMenu();
+
+const closeAll = () => document.querySelectorAll('.pop').forEach(p => p.style.display = 'none');
+const toggle = (el, e) => { e.stopPropagation(); const open = el.style.display === 'block'; closeAll(); el.style.display = open ? 'none' : 'block'; };
+$('pick').onclick = e => toggle($('menu'), e);
+$('gear').onclick = e => toggle($('set'), e);
+$('set').onclick = e => e.stopPropagation();
+document.onclick = closeAll;
+$('flash').onclick = () => { setTorch(!torchOn); ws.send(JSON.stringify({ type: 'torch', on: torchOn })); };
+
+function applySize() { out.width = cfg.w; out.height = cfg.h; if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'size', w: cfg.w, h: cfg.h })); }
+function buildSizes() {
+  $('sizes').innerHTML = '';
+  SIZES.forEach(([n, w, h]) => {
+    const b = document.createElement('button'); b.className = 'chip' + (cfg.w === w && cfg.h === h ? ' on' : ''); b.textContent = n;
+    b.onclick = () => { cfg.w = w; cfg.h = h; cfg.px = cfg.py = 0; applySize(); save(); buildSizes(); };
+    $('sizes').appendChild(b);
+  });
+}
+$('rot').onclick = () => { cfg.rot = (cfg.rot + 1) % 4; cfg.px = cfg.py = 0; save(); };
+$('reset').onclick = () => { cfg.rot = 0; cfg.zoom = 1; cfg.px = cfg.py = 0; $('zoom').value = 1; $('zv').textContent = '1.0×'; save(); };
+$('zoom').value = cfg.zoom; $('zv').textContent = cfg.zoom.toFixed(1) + '×';
+$('zoom').oninput = e => { cfg.zoom = +e.target.value; $('zv').textContent = cfg.zoom.toFixed(1) + '×'; save(); };
+buildSizes(); applySize();
+
+let drag = null;
+out.onpointerdown = e => { drag = { x: e.clientX, y: e.clientY, px: cfg.px, py: cfg.py }; out.setPointerCapture(e.pointerId); out.style.cursor = 'grabbing'; };
+out.onpointermove = e => {
+  if (!drag) return;
+  const k = cfg.w / out.clientWidth;
+  cfg.px = drag.px + (e.clientX - drag.x) * k; cfg.py = drag.py + (e.clientY - drag.y) * k;
+};
+out.onpointerup = () => { drag = null; out.style.cursor = 'grab'; save(); };
+
+function draw() {
+  if (vid.videoWidth) {
+    const odd = cfg.rot % 2, ew = odd ? vid.videoHeight : vid.videoWidth, eh = odd ? vid.videoWidth : vid.videoHeight;
+    const s = Math.max(cfg.w / ew, cfg.h / eh) * cfg.zoom;
+    const mx = Math.max(0, (ew * s - cfg.w) / 2), my = Math.max(0, (eh * s - cfg.h) / 2);
+    cfg.px = Math.min(mx, Math.max(-mx, cfg.px)); cfg.py = Math.min(my, Math.max(-my, cfg.py));
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, cfg.w, cfg.h);
+    ctx.save();
+    ctx.translate(cfg.w / 2 + cfg.px, cfg.h / 2 + cfg.py);
+    ctx.rotate(cfg.rot * Math.PI / 2); ctx.scale(s, s);
+    ctx.drawImage(vid, -vid.videoWidth / 2, -vid.videoHeight / 2);
+    ctx.restore();
+  }
+  requestAnimationFrame(draw);
+}
+draw();
+
+let encoding = false;
+setInterval(() => {
+  if (encoding || !vid.videoWidth || !ws || ws.readyState !== 1 || ws.bufferedAmount > 2e6) return;
+  encoding = true;
+  out.toBlob(b => { encoding = false; b && ws.readyState === 1 && ws.send(b); }, 'image/jpeg', 0.95);
+}, 1000 / 30);
+connect();
+</script></body></html>

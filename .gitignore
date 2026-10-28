@@ -1,0 +1,9 @@
+# Bağımlılıklar
+node_modules/
+
+# Yerelde üretilen sertifika ve özel anahtar (her kurulumda start.sh/server.js yeniden üretir)
+cert/
+
+# Günlükler ve editör/sistem dosyaları
+*.log
+.DS_Store
